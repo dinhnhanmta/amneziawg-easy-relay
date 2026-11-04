@@ -140,8 +140,23 @@ AllowedIPs = 10.88.31.{2 if role == 'out' else 1}/32
 ''' + (f'Endpoint = {host(out_host)}:34431\nPersistentKeepalive = 25\n' if role == 'relay' else '')
 
 
-def tunnel_command(mtu, role):
+def tunnel_command(mtu, role, engine='go'):
     address = '10.88.31.1/30' if role == 'out' else '10.88.31.2/30'
+    if engine == 'kernel':
+        return f'''set -eu
+if ip link show {IFACE} >/dev/null 2>&1; then
+  [ "$(cat /sys/class/net/{IFACE}/ifalias)" = awge-managed-kernel ] || exit 1
+  ip link del {IFACE}
+fi
+ip link add {IFACE} type amneziawg
+trap 'ip link del {IFACE} 2>/dev/null || true' EXIT
+trap 'exit 0' TERM INT
+ip link set {IFACE} alias awge-managed-kernel
+awg setconf {IFACE} /cfg/backhaul.conf
+ip addr replace {address} dev {IFACE}
+ip link set {IFACE} mtu {mtu} up
+while :; do sleep 60 & wait "$!"; done
+'''
     return f'''set -eu
 amneziawg-go -f {IFACE} &
 pid=$!
@@ -276,6 +291,34 @@ def start_container(name, args, image, command=()):
         label = run('docker', 'inspect', '--format', '{{index .Config.Labels "' + LABEL + '"}}', name, capture=True)
         if label != '1':
             raise ValueError(f'Container {name} is not owned by this installer; refusing to replace it')
+        # Docker start retains its original command (including the old tunnel MTU).
+        # Recreate only this stateless, owned container when startup changes, with
+        # the stopped original kept until the replacement has started successfully.
+        if name == BACKHAUL:
+            previous_command = json.loads(run('docker', 'inspect', '--format', '{{json .Config.Cmd}}', name, capture=True))
+            if previous_command != list(command):
+                backup = name + '-previous'
+                if exists(backup):
+                    raise ValueError('A previous backhaul container exists; inspect it before retrying an upgrade')
+                run('docker', 'stop', name, capture=True)
+                run('docker', 'rename', name, backup, capture=True)
+                try:
+                    start_container(name, args, image, command)
+                    # Wait for the AWG engine before removing the rollback container.
+                    for _ in range(50):
+                        if run('docker', 'exec', name, 'awg', 'show', IFACE, 'listen-port', capture=True, check=False) in ('34431', '45131'):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        raise RuntimeError('Replacement backhaul failed to become ready')
+                except Exception:
+                    if exists(name):
+                        run('docker', 'rm', '-f', name, capture=True, check=False)
+                    run('docker', 'rename', backup, name, capture=True)
+                    run('docker', 'start', name, capture=True)
+                    raise
+                run('docker', 'rm', backup, capture=True)
+                return
         run('docker', 'start', name, capture=True)
         return
     run('docker', 'run', '-d', '--name', name, '--label', LABEL + '=1', '--restart', 'unless-stopped',
@@ -394,12 +437,17 @@ WantedBy=timers.target
 
 
 def install(state):
+    if state.get('engine') == 'kernel' and not Path('/sys/module/amneziawg').exists():
+        try:
+            run('modprobe', 'amneziawg', capture=True)
+        except RuntimeError:
+            raise ValueError('Install a compatible host AmneziaWG kernel module before using or restoring the kernel backend') from None
     write('/etc/sysctl.d/95-awge-relay.conf', 'net.ipv4.ip_forward=1\n', 0o644)
     run('sysctl', '-q', '-p', '/etc/sysctl.d/95-awge-relay.conf')
     write(ROOT / 'backhaul' / 'backhaul.conf', tunnel_config(state['role'], state['private'], state['peer'], state['hpk'], state['out_host']))
     start_container(BACKHAUL, ['--network', 'host', '--cap-add', 'NET_ADMIN', '--device', '/dev/net/tun',
                               '-v', str(ROOT / 'backhaul') + ':/cfg:ro', '--entrypoint', 'sh'],
-                    state['awg_image'], ['-ec', tunnel_command(state['mtu'], state['role'])])
+                    state['awg_image'], ['-ec', tunnel_command(state['mtu'], state['role'], state.get('engine', 'go'))])
     if state['role'] == 'out':
         (ROOT / 'easy').mkdir(exist_ok=True, mode=0o700)
         if not (ROOT / 'panel-password.txt').exists():
@@ -462,10 +510,11 @@ def parser():
     group = p.add_mutually_exclusive_group()
     group.add_argument('--pair', help='Secret pairing token printed by OUT')
     group.add_argument('--pair-file', type=Path, help='File containing the pairing token, avoids shell-history exposure')
-    p.add_argument('--mtu', type=int, default=1380, help='Backhaul MTU, 1280..1380 (default 1380)')
+    p.add_argument('--mtu', type=int, default=1360, help='Backhaul MTU, 1280..1380 (default 1360)')
     p.add_argument('--client-mtu', type=int, default=1280, help='Client MTU (default 1280; must leave 80 bytes inside backhaul)')
     p.add_argument('--mss', type=int, default=0, help='Optional persistent TCP MSS, 0 means off')
     p.add_argument('--public-ui', action='store_true', help='Expose OUT panel on HTTPS port 443 with an automatically generated self-signed certificate')
+    p.add_argument('--backhaul-engine', choices=('go', 'kernel'), help='Optional backhaul engine; kernel needs a compatible host AmneziaWG module already installed')
     return p
 
 
@@ -474,6 +523,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.public_ui and args.role != 'out':
         p.error('--public-ui is only supported with --role out')
+    if args.backhaul_engine and args.role not in ('out', 'relay'):
+        p.error('--backhaul-engine is only supported when installing OUT or relay')
     pairing = None
     if args.role == 'out':
         if not args.out_host or not args.relay_host:
@@ -540,6 +591,11 @@ def main(argv=None):
                 write(ROOT / 'relay-pair.txt', token + '\n')
             else:
                 state = dict(pairing, role='relay', awg_image=image)
+            write(STATE, json.dumps(state, indent=2) + '\n')
+        if args.backhaul_engine:
+            if args.backhaul_engine == 'kernel' and not Path('/sys/module/amneziawg').exists():
+                run('modprobe', 'amneziawg')
+            state['engine'] = args.backhaul_engine
             write(STATE, json.dumps(state, indent=2) + '\n')
         if args.role == 'out' and args.public_ui:
             if not state.get('ui_image'):

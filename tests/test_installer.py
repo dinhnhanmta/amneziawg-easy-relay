@@ -47,6 +47,30 @@ class PairTests(unittest.TestCase):
 
 
 class InstallTests(unittest.TestCase):
+    def test_default_backhaul_fits_observed_1456_byte_public_path(self):
+        args = I.parser().parse_args(['--role', 'out', '--out-host', 'out.test', '--relay-host', 'relay.test'])
+        # IPv4 + UDP + encrypted WG header/tag + configured S4 prefix.
+        self.assertLessEqual(args.mtu + 20 + 8 + 32 + 17, 1456)
+        self.assertLessEqual(args.client_mtu + 80, args.mtu)
+
+    def test_backhaul_recreate_failure_restores_original_container(self):
+        containers = {I.BACKHAUL}
+        operations = []
+        def fake_run(*args, **kwargs):
+            operations.append(args)
+            if args[1] == 'inspect':
+                return json.dumps(['old startup']) if 'json .Config.Cmd' in args[3] else '1'
+            if args[1] == 'rename':
+                containers.remove(args[2]); containers.add(args[3])
+            if args[1] == 'run':
+                raise RuntimeError('simulated create failure')
+            return ''
+        with patch.object(I, 'exists', side_effect=lambda n: n in containers), patch.object(I, 'run', side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, 'simulated create failure'):
+                I.start_container(I.BACKHAUL, [], 'image', ['new startup'])
+        self.assertEqual({I.BACKHAUL}, containers)
+        self.assertIn(('docker', 'start', I.BACKHAUL), operations)
+
     def test_public_ui_requires_authentication_before_exposure(self):
         with patch.object(I, 'start_container') as start:
             with self.assertRaisesRegex(ValueError, 'without its generated authentication'):
@@ -114,6 +138,7 @@ class ShellTests(unittest.TestCase):
             self.skipTest('Linux Bash syntax check runs in GitHub Actions')
         scripts = [I.firewall_script(role) for role in ('out', 'relay')]
         scripts += [I.tunnel_command(1380, role) for role in ('out', 'relay')]
+        scripts += [I.tunnel_command(1360, role, 'kernel') for role in ('out', 'relay')]
         scripts += [I.watchdog_script(dict(sample_pair(), role=role)) for role in ('out', 'relay')]
         for script in scripts:
             result = subprocess.run(['bash', '-n'], input=script, text=True, capture_output=True)

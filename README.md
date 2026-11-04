@@ -88,7 +88,19 @@ AWG Easy cũ cần import bản backup JSON đầy đủ qua UI để giữ khó
 
 ## MTU và MSS
 
-Mặc định backhaul MTU **1380**, client MTU **1280**, giữ khoảng trống cho lớp VPN bên trong trên đường truyền VPS MTU 1500. Client route cả IPv4/IPv6 vào VPN nhưng bản cài này chỉ cung cấp Internet IPv4; lưu lượng IPv6 được chặn do không có peer IPv6 tương ứng, không có egress IPv6. Cần kiểm tra bằng client thật.
+Mặc định backhaul MTU **1360**, client MTU **1280**. Phải tính cả lớp AWG 3.1: với S4=17, một gói đầy 1380 byte có thể cần ít nhất **1457 byte** trên IPv4 sau khi thêm IP/UDP, header và tag AWG. Đường truyền giữa hai VPS test chỉ cho phép **1456 byte**, nên mặc định cũ 1380 gây mất gói và làm TCP qua tunnel bị đứng. Mức 1360 để lại khoảng trống cho tuyến này; đường truyền khác vẫn cần đo PMTU thực tế.
+
+Client route cả IPv4/IPv6 vào VPN nhưng bản cài này chỉ cung cấp Internet IPv4; lưu lượng IPv6 được chặn do không có peer IPv6 tương ứng, không có egress IPv6. Cần kiểm tra bằng client thật.
+
+Nếu thay MTU đã lưu, phải đổi đồng bộ hai đầu và token ghép. Chỉ `docker start` không áp dụng command/MTU mới: installer tái tạo container backhaul do nó quản lý khi startup command thay đổi, giữ container cũ để rollback nếu engine mới không lên. Dữ liệu mount và khóa được giữ nguyên; có gián đoạn tunnel ngắn khi đổi container.
+
+### Backhaul kernel khi relay yếu CPU
+
+Mặc định vẫn dùng engine Go để chạy trên VPS mới có TUN. Nếu relay đã có **module AmneziaWG kernel tương thích AWG 3.1/Header Protection**, có thể thêm `--backhaul-engine kernel` vào lệnh cài relay. Chạy lại với `--backhaul-engine go` để trở về engine Go. Lựa chọn được lưu trong state, các lần chạy sau không tự đổi lại.
+
+Đã thử kernel module `3.1.20260812` trên Ubuntu kernel `6.8.0-137-generic`: tạo tunnel với khóa thử riêng, xác nhận handshake thật với OUT Go và đo hai chiều trước khi chuyển relay. Header Protection, padding, khóa production, endpoint và AWG Easy trên OUT được giữ nguyên. Container vẫn quản lý vòng đời interface kernel và watchdog kiểm tra bằng `awg show`; không còn tiến trình `amneziawg-go` cho backhaul kernel này.
+
+Installer **không tự build, nâng cấp hoặc thay module kernel**. Khi restore state dùng kernel lên VPS mới, cần cài module tương thích trước; không suy ra hỗ trợ 3.1 chỉ từ việc `ip link add ... type amneziawg` thành công. Tham khảo [module chính thức](https://github.com/amnezia-vpn/amneziawg-linux-kernel-module). Tốc độ phụ thuộc CPU, đường mạng, client và điểm đo, không có cam kết 250/250 Mbps.
 
 Nếu đường truyền MTU thấp, có thể đặt lúc cài OUT `--mtu 1280 --client-mtu 1180`; mức client dưới 1280 chỉ phù hợp thử nghiệm IPv4, tùy hỗ trợ của ứng dụng. Không tự giảm MTU trên hệ thống đang chạy.
 
