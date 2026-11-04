@@ -21,9 +21,11 @@ ROOT = Path('/opt/amnezia-easy-relay')
 STATE = ROOT / 'state.json'
 BACKHAUL = 'awge-backhaul'
 EASY = 'amnezia-wg-easy'
+UI = 'awge-panel-https'
 IFACE = 'awgeb0'
 AWG_IMAGE = 'amneziavpn/amneziawg-go:3.1.20260828'
 EASY_IMAGE = 'ghcr.io/w0rng/amnezia-wg-easy:latest'
+UI_IMAGE = 'nginx:stable-alpine'
 URL = 'https://raw.githubusercontent.com/dinhnhanmta/amneziawg-easy-relay/main/install.sh'
 LABEL = 'io.github.dinhnhanmta.amnezia-easy-relay'
 
@@ -157,7 +159,7 @@ wait "$pid"
 '''
 
 
-def firewall_script(role):
+def firewall_script(role, public_ui=False):
     # Recheck rules after Docker/firewall restarts. Never flush unrelated chains.
     common = f'''#!/bin/bash
 set -Eeuo pipefail
@@ -171,7 +173,8 @@ flock -w 10 9
 }
 ''' + f'add filter INPUT -i {IFACE} -p icmp -j ACCEPT\n'
     if role == 'out':
-        return common + 'add filter INPUT -p udp --dport 34431 -j ACCEPT\n'
+        return common + 'add filter INPUT -p udp --dport 34431 -j ACCEPT\n' + (
+            'add filter INPUT -p tcp --dport 443 -j ACCEPT\n' if public_ui else '')
     return common + f'''WAN=$(ip -4 route show default | awk '{{for(i=1;i<=NF;i++) if($i=="dev"){{print $(i+1);exit}}}}')
 [ -n "$WAN" ]
 ip link show {IFACE} >/dev/null 2>&1 || exit 0
@@ -249,7 +252,7 @@ def dependencies():
     env = os.environ.copy()
     env.update(DEBIAN_FRONTEND='noninteractive', NEEDRESTART_MODE='a')
     subprocess.run(['apt-get', 'update', '-qq'], env=env, check=True, timeout=600)
-    packages = ['iptables', 'iproute2', 'iputils-ping', 'curl', 'ca-certificates', 'util-linux']
+    packages = ['iptables', 'iproute2', 'iputils-ping', 'curl', 'ca-certificates', 'util-linux', 'openssl']
     if not shutil.which('docker'):
         packages.append('docker.io')
     subprocess.run(['apt-get', 'install', '-y', *packages], env=env, check=True, timeout=900)
@@ -279,8 +282,75 @@ def start_container(name, args, image, command=()):
         '--log-opt', 'max-size=10m', '--log-opt', 'max-file=3', *args, image, *command, capture=True)
 
 
+def ui_config():
+    return '''user nginx;
+worker_processes auto;
+error_log /dev/stderr warn;
+pid /var/run/nginx.pid;
+events { worker_connections 512; }
+http {
+  include /etc/nginx/mime.types;
+  access_log off;
+  server {
+    listen 0.0.0.0:443 ssl;
+    server_name _;
+    ssl_certificate /awge-ui/panel.crt;
+    ssl_certificate_key /awge-ui/panel.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 10m;
+    add_header X-Content-Type-Options nosniff always;
+    location / {
+      proxy_pass http://127.0.0.1:51821;
+      proxy_http_version 1.1;
+      proxy_set_header Host $host;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_cookie_flags ~ secure httponly samesite=lax;
+    }
+  }
+}
+'''
+
+
+def public_ui(state):
+    if not state.get('public_ui'):
+        return
+    if not state.get('password_hash'):
+        raise ValueError('Refusing to expose a panel without its generated authentication password')
+    present = exists(UI)
+    was_running = present and run('docker', 'inspect', '--format', '{{.State.Running}}', UI, capture=True) == 'true'
+    if not present:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind(('0.0.0.0', 443))
+            except OSError:
+                raise ValueError('TCP 443 is already occupied; keep the SSH UI or free this port deliberately') from None
+    directory = ROOT / 'ui'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    cert, private = directory / 'panel.crt', directory / 'panel.key'
+    if not cert.exists() or not private.exists():
+        hostname = host(state['out_host'])
+        try:
+            ipaddress.IPv4Address(hostname)
+            san = 'IP:' + hostname
+        except ValueError:
+            san = 'DNS:' + hostname
+        run('openssl', 'req', '-x509', '-nodes', '-newkey', 'rsa:2048', '-sha256', '-days', '365',
+            '-keyout', private, '-out', cert, '-subj', '/CN=' + hostname,
+            '-addext', 'subjectAltName=' + san, capture=True)
+        os.chmod(private, 0o600)
+        os.chmod(cert, 0o644)
+    write(directory / 'nginx.conf', ui_config())
+    start_container(UI, ['--network', 'host', '-v', str(directory) + ':/awge-ui:ro', '--entrypoint', 'nginx'],
+                    state['ui_image'], ['-c', '/awge-ui/nginx.conf', '-g', 'daemon off;'])
+    if was_running:
+        run('docker', 'exec', UI, 'nginx', '-t', '-c', '/awge-ui/nginx.conf', capture=True)
+        run('docker', 'exec', UI, 'nginx', '-c', '/awge-ui/nginx.conf', '-s', 'reload', capture=True)
+
+
 def install_services(state):
-    write(ROOT / 'firewall.sh', firewall_script(state['role']), 0o700)
+    write(ROOT / 'firewall.sh', firewall_script(state['role'], state.get('public_ui', False)), 0o700)
     write(ROOT / 'maintain.sh', watchdog_script(state), 0o700)
     write('/etc/systemd/system/awge-firewall.service', f'''[Unit]
 Description=AWG Easy relay firewall
@@ -353,6 +423,7 @@ def install(state):
                                '--sysctl', 'net.ipv4.conf.all.src_valid_mark=1', '--sysctl', 'net.ipv4.ip_forward=1',
                                '--env-file', str(ROOT / 'easy.env'), '-v', str(ROOT / 'easy') + ':/etc/wireguard',
                                '-p', '2445:2445/udp', '-p', '127.0.0.1:51821:51821/tcp'], state['easy_image'])
+        public_ui(state)
     install_services(state)
 
 
@@ -364,6 +435,10 @@ def check_status(state):
     if state['role'] == 'out':
         checks += [('AWG Easy interface', ['docker', 'exec', EASY, 'wg', 'show', 'wg0', 'listen-port']),
                    ('Web UI', ['curl', '-fsS', '--max-time', '5', '-o', '/dev/null', 'http://127.0.0.1:51821/'])]
+        if state.get('public_ui'):
+            checks += [('HTTPS panel', ['curl', '-fsS', '--max-time', '5', '--cacert', str(ROOT / 'ui/panel.crt'),
+                       '--connect-to', f'{state["out_host"]}:443:127.0.0.1:443', '-o', '/dev/null',
+                       'https://' + state['out_host'] + '/'])]
     else:
         checks += [('Tunnel to OUT', ['ping', '-c', '3', '-W', '2', '10.88.31.1'])]
     for label, cmd in checks:
@@ -390,12 +465,15 @@ def parser():
     p.add_argument('--mtu', type=int, default=1380, help='Backhaul MTU, 1280..1380 (default 1380)')
     p.add_argument('--client-mtu', type=int, default=1280, help='Client MTU (default 1280; must leave 80 bytes inside backhaul)')
     p.add_argument('--mss', type=int, default=0, help='Optional persistent TCP MSS, 0 means off')
+    p.add_argument('--public-ui', action='store_true', help='Expose OUT panel on HTTPS port 443 with an automatically generated self-signed certificate')
     return p
 
 
 def main(argv=None):
     p = parser()
     args = p.parse_args(argv)
+    if args.public_ui and args.role != 'out':
+        p.error('--public-ui is only supported with --role out')
     pairing = None
     if args.role == 'out':
         if not args.out_host or not args.relay_host:
@@ -440,7 +518,7 @@ def main(argv=None):
             if pairing and any(state[k] != pairing[k] for k in ('out_host', 'relay_host', 'private', 'peer', 'hpk', 'mtu')):
                 raise ValueError('Pairing differs from the existing relay; refusing to replace its identity')
             dependencies()
-            for name in ('awg_image', 'easy_image'):
+            for name in ('awg_image', 'easy_image', 'ui_image'):
                 if name in state:
                     run('docker', 'pull', state[name])
         else:
@@ -463,6 +541,11 @@ def main(argv=None):
             else:
                 state = dict(pairing, role='relay', awg_image=image)
             write(STATE, json.dumps(state, indent=2) + '\n')
+        if args.role == 'out' and args.public_ui:
+            if not state.get('ui_image'):
+                state['ui_image'] = pin_image(UI_IMAGE)
+            state['public_ui'] = True
+            write(STATE, json.dumps(state, indent=2) + '\n')
         install(state)
         # Interface creation is asynchronous; wait before reporting success.
         for _ in range(30):
@@ -478,6 +561,9 @@ def main(argv=None):
             print(f'bash <(curl -fsSL {URL}) --role relay --pair {shlex.quote(token)}')
             print(f'\nUI: ssh -L 51821:127.0.0.1:51821 root@{state["out_host"]}')
             print('Then open http://127.0.0.1:51821; generated UI password:', ROOT / 'panel-password.txt')
+            if state.get('public_ui'):
+                print('Public panel: https://' + state['out_host'] + ' (self-signed certificate; browser warning on first visit)')
+                print('Provider firewall: allow OUT TCP 443 for panel access.')
             print('Provider firewall: allow OUT UDP 34431 from relay. Relay must allow client UDP 2445.')
         else:
             print('RELAY_READY. Client endpoint:', state['relay_host'] + ':2445')

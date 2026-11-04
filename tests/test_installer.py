@@ -47,6 +47,12 @@ class PairTests(unittest.TestCase):
 
 
 class InstallTests(unittest.TestCase):
+    def test_public_ui_requires_authentication_before_exposure(self):
+        with patch.object(I, 'start_container') as start:
+            with self.assertRaisesRegex(ValueError, 'without its generated authentication'):
+                I.public_ui({'public_ui': True})
+            start.assert_not_called()
+
     def test_invalid_options_fail_before_preflight_or_apt(self):
         cases = [['--role', 'out'], ['--role', 'relay'],
                  ['--role', 'out', '--out-host', 'out.test', '--relay-host', 'relay.test', '--mss', '1400'],

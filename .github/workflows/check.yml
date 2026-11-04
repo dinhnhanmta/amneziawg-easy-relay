@@ -28,7 +28,7 @@ jobs:
       - name: Install OUT with real Docker, TUN and systemd
         run: |
           sudo modprobe tun
-          sudo python3 installer.py --role out --out-host 192.0.2.10 --relay-host 192.0.2.20 > /tmp/awge-install.log 2>&1 || {
+          sudo python3 installer.py --role out --out-host 192.0.2.10 --relay-host 192.0.2.20 --public-ui > /tmp/awge-install.log 2>&1 || {
             # Installer output contains a pairing secret: do not publish its log.
             echo 'OUT install failed; collecting only public service states'
             sudo grep -E '^(ERROR:|E:|Error response from daemon:|docker:)' /tmp/awge-install.log || true
@@ -37,12 +37,12 @@ jobs:
             exit 1
           }
           sudo python3 installer.py --role status
-          sudo docker restart awge-backhaul amnezia-wg-easy > /dev/null
+          sudo docker restart awge-backhaul amnezia-wg-easy awge-panel-https > /dev/null
           sleep 10
           sudo python3 installer.py --role status
       - name: Rerun preserves identity and UI password
         run: |
           sudo sha256sum /opt/amnezia-easy-relay/backhaul/backhaul.conf /opt/amnezia-easy-relay/panel-password.txt > /tmp/before.sha
-          sudo python3 installer.py --role out --out-host 192.0.2.10 --relay-host 192.0.2.20 > /tmp/awge-rerun.log 2>&1
+          sudo python3 installer.py --role out --out-host 192.0.2.10 --relay-host 192.0.2.20 --public-ui > /tmp/awge-rerun.log 2>&1
           sudo sha256sum -c /tmp/before.sha
           sudo python3 installer.py --role backup

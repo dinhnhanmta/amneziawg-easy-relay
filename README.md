@@ -15,18 +15,22 @@ Cần VPS có TUN (`/dev/net/tun`), systemd, Internet/APT, `curl` và Python 3. 
 **1. Trên OUT**, thay `OUT_IP` và `RELAY_IP` bằng IPv4 hoặc tên miền của bạn, rồi chạy một dòng:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/dinhnhanmta/amneziawg-easy-relay/main/install.sh) --role out --out-host OUT_IP --relay-host RELAY_IP
+bash <(curl -fsSL https://raw.githubusercontent.com/dinhnhanmta/amneziawg-easy-relay/main/install.sh) --role out --out-host OUT_IP --relay-host RELAY_IP --public-ui
 ```
 
 **2. Trên relay**, dán nguyên lệnh một dòng có `--role relay --pair ...` được OUT in ra. Không cần gõ mật khẩu hoặc nhập từng khóa. Chỉ chuyển token qua kênh riêng giữa hai máy.
 
-**3. Mở panel** từ máy cá nhân:
+**3. Mở panel trực tiếp tại `https://OUT_IP`** (TCP 443). Bộ cài tự tạo chứng chỉ tự ký có SAN khớp IP/tên miền OUT. Trình duyệt sẽ cảnh báo chứng chỉ: kiểm tra đúng địa chỉ VPS rồi chấp nhận chứng chỉ ở lần đầu. Mật khẩu quản trị tự sinh nằm trên OUT tại `/opt/amnezia-easy-relay/panel-password.txt`; xem bằng `cat` qua SSH. Không có bước nhập mật khẩu khi cài.
+
+Nếu đã cài bản trước, chạy lại đúng lệnh OUT cũ và thêm **`--public-ui`** để bật HTTPS, giữ nguyên khóa, khách và mật khẩu. Cần cổng TCP 443 còn trống. Chứng chỉ có thời hạn 365 ngày, chưa tự gia hạn; cần thay chứng chỉ và restart `awge-panel-https` trước khi hết hạn. Nếu đã có tên miền/chứng chỉ tin cậy, có thể thay `ui/panel.crt` và `ui/panel.key` trong thư mục cài.
+
+Nếu muốn panel chỉ truy cập qua SSH, bỏ `--public-ui` ở **lần cài đầu**, sau đó mở tunnel từ máy cá nhân:
 
 ```bash
 ssh -L 51821:127.0.0.1:51821 root@OUT_IP
 ```
 
-Truy cập `http://127.0.0.1:51821`. Trên OUT, xem mật khẩu quản trị tự sinh bằng `cat /opt/amnezia-easy-relay/panel-password.txt`. Đây là mật khẩu đăng nhập panel; không có bước nhập mật khẩu khi cài.
+Truy cập `http://127.0.0.1:51821`. Truy cập `http://OUT_IP:51821` sẽ không hoạt động vì cổng HTTP backend chỉ mở trên localhost. Khi HTTPS đã bật, bỏ flag trong lần chạy sau không tự tắt HTTPS; cấu hình đã lưu được giữ nguyên.
 
 Tạo khách và tải file/QR từ panel. Endpoint của khách tự trỏ về **RELAY_IP:2445**. Cần ứng dụng tương thích AmneziaWG legacy cho kết nối client; lớp 3.1 chỉ nằm giữa hai VPS.
 
@@ -37,9 +41,9 @@ Firewall của nhà cung cấp cần cho phép:
 | VPS | Inbound |
 | --- | --- |
 | Relay | UDP 2445 từ client; SSH từ mạng quản trị |
-| OUT | UDP 34431 từ IP relay; SSH từ mạng quản trị |
+| OUT | UDP 34431 từ IP relay; TCP 443 để truy cập panel HTTPS; SSH từ mạng quản trị |
 
-Panel chỉ publish lên `127.0.0.1:51821`, không cần mở TCP 51821 công khai. Container AWG Easy publish UDP 2445 trên host OUT để nhận gói từ tunnel; có thể giữ cổng này đóng ở firewall nhà cung cấp để tránh client đi trực tiếp vào OUT.
+Backend AWG Easy chỉ publish lên `127.0.0.1:51821`; khi có `--public-ui`, container Nginx chuyển tiếp HTTPS công khai trên TCP 443 tới backend này. Mật khẩu đăng nhập panel vẫn được yêu cầu. Không cần mở TCP 51821 công khai. Container AWG Easy publish UDP 2445 trên host OUT để nhận gói từ tunnel; có thể giữ cổng này đóng ở firewall nhà cung cấp để tránh client đi trực tiếp vào OUT.
 
 Tên miền phải có bản ghi A đúng IPv4, dùng DNS only nếu qua Cloudflare. Relay cập nhật endpoint OUT từ DNS mỗi phút; tốc độ nhận IP mới còn phụ thuộc cache/TTL. Client phân giải lại DNS relay theo hành vi của ứng dụng; có thể cần tắt/bật VPN khi thay relay.
 
@@ -59,12 +63,13 @@ Installer thêm các rule cần thiết vào iptables host và lặp lại mỗi
 bash <(curl -fsSL https://raw.githubusercontent.com/dinhnhanmta/amneziawg-easy-relay/main/install.sh) --role status
 ```
 
-Kiểm tra engine backhaul, IPv4 forwarding, timer; OUT kiểm tra interface AWG Easy và HTTP panel, relay kiểm tra ping qua tunnel. Kết quả này chưa chứng minh Internet/DNS/UDP từ client hoặc tự phục hồi sau reboot.
+Kiểm tra engine backhaul, IPv4 forwarding, timer; OUT kiểm tra interface AWG Easy, HTTP backend và HTTPS khi được bật, relay kiểm tra ping qua tunnel. HTTPS được kiểm tra bằng chứng chỉ đã lưu, không bỏ xác minh TLS. Kết quả này chưa chứng minh Internet/DNS/UDP từ client hoặc tự phục hồi sau reboot.
 
 ```bash
 journalctl -u awge-maintain.service -n 50 --no-pager
 docker logs --tail 50 awge-backhaul
 docker logs --tail 50 amnezia-wg-easy  # chỉ có trên OUT
+docker logs --tail 50 awge-panel-https  # nếu đã bật HTTPS
 ```
 
 Timer chạy mỗi phút, restart container khi engine/interface cục bộ không đáp ứng, cập nhật DNS và áp lại firewall. Process AWG chạy foreground được giám sát: engine chết thì container thoát để Docker restart; không dùng `tail -f /dev/null`. Mất kết nối mạng chỉ ghi log, không restart lặp vì peer tạm offline. Có giới hạn xoay log Docker; không tự tạo swap, đặt giới hạn RAM hoặc reboot.
@@ -93,6 +98,7 @@ MSS mặc định **tắt**. Tùy chọn `--mss 1100` cài rule TCPMSS trong Pos
 
 - Backhaul: `amneziavpn/amneziawg-go:3.1.20260828`, sau pull được ghi cố định theo digest.
 - AWG Easy: image upstream `ghcr.io/w0rng/amnezia-wg-easy:latest` ở lần cài đầu; ghi digest để chạy lại/khôi phục không tự nâng phiên bản.
+- HTTPS proxy tùy chọn: `nginx:stable-alpine`, cũng ghi cố định digest sau lần pull đầu.
 - Entry point kiểm tra SHA256 của `installer.py` trước khi chạy. Đây là kiểm tra khớp phiên bản, không thay thế việc tin cậy repo/HTTPS.
 - Unit tests kiểm tra token, chống chèn hostname, cấu hình, retry giữ identity và logic kiểm tra lỗi. GitHub Actions kiểm tra Bash, Python và chạy container OUT thực tế trên Ubuntu runner nếu có quyền TUN/Docker.
 - **Chưa chứng nhận chạy đầy đủ trên hai VPS hoặc điện thoại.** Bước tiếp theo là test VPS mới, client Internet/DNS/TCP/UDP, firewall nhà cung cấp và reboot từng máy.
