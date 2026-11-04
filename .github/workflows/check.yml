@@ -29,9 +29,9 @@ jobs:
           sleep 3
           sudo systemctl is-active awge-direct.timer
           sudo python3 direct-relay.py --action apply
-          sudo iptables-save | sed '/^#/d' > /tmp/direct-before.rules
+          sudo iptables-save | sed '/^#/d;s/\[[0-9]*:[0-9]*\]/[0:0]/g' > /tmp/direct-before.rules
           sudo python3 direct-relay.py --action apply
-          sudo iptables-save | sed '/^#/d' > /tmp/direct-after.rules
+          sudo iptables-save | sed '/^#/d;s/\[[0-9]*:[0-9]*\]/[0:0]/g' > /tmp/direct-after.rules
           diff -u /tmp/direct-before.rules /tmp/direct-after.rules
           WAN=$(ip -4 route get 198.51.100.25 | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
           sudo iptables -t nat -D PREROUTING -i "$WAN" -p udp --dport 52447 -m addrtype --dst-type LOCAL -m comment --comment awge-direct-relay -j AWGED_DNAT
