@@ -249,8 +249,10 @@ def dependencies():
     env = os.environ.copy()
     env.update(DEBIAN_FRONTEND='noninteractive', NEEDRESTART_MODE='a')
     subprocess.run(['apt-get', 'update', '-qq'], env=env, check=True, timeout=600)
-    subprocess.run(['apt-get', 'install', '-y', 'docker.io', 'iptables', 'iproute2', 'iputils-ping',
-                    'curl', 'ca-certificates', 'util-linux'], env=env, check=True, timeout=900)
+    packages = ['iptables', 'iproute2', 'iputils-ping', 'curl', 'ca-certificates', 'util-linux']
+    if not shutil.which('docker'):
+        packages.append('docker.io')
+    subprocess.run(['apt-get', 'install', '-y', *packages], env=env, check=True, timeout=900)
     run('systemctl', 'enable', '--now', 'docker')
 
 

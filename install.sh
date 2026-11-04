@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 # The checksum binds this entry point to its reviewed Python implementation.
-INSTALLER_SHA256=289a2b642e268bf5bd4c06f8b87436ec6525443387c615f5c21e10b038a87be2
+INSTALLER_SHA256=e2b2de5d8e51db5059332102ab570479bdc4797c281d64a2392678fdb7a798b5
 BASE=https://raw.githubusercontent.com/dinhnhanmta/amneziawg-easy-relay/main
 
 for tool in curl sha256sum python3; do
