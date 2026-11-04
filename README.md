@@ -1,4 +1,37 @@
-# AmneziaWG Easy + AWG 3.1 relay
+# AmneziaWG Easy relay
+
+## Relay NAT kernel: lựa chọn nhẹ CPU khi UDP giữa hai VPS hoạt động
+
+```text
+Client AWG → relay:2445/UDP [DNAT + SNAT kernel] → OUT:2445/UDP [AWG Easy] → Internet
+```
+
+Relay chuyển tiếp gói AWG đã mã hóa, **không bọc thêm một VPN giữa hai VPS**. AWG Easy, khóa và quản lý user nằm trên OUT. Chuyển panel sang relay không tự làm VPN nhanh hơn; kết thúc AWG trên relay còn tốn CPU mã hóa/giải mã tại đó. NAT tránh thêm process relay trong userspace. Đã tham khảo [Realm](https://github.com/zhboner/realm) và [Netfilter NAT](https://netfilter.org/projects/nftables/manpage.html); bản này dùng iptables kernel trực tiếp.
+
+Nếu OUT đã có AWG Easy hoạt động và đang nghe UDP 2445, chạy **một dòng trên relay Ubuntu 24.04**, thay `OUT_IP` bằng IPv4 hoặc tên miền OUT:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/dinhnhanmta/amneziawg-easy-relay/main/direct.sh) --out-host OUT_IP --listen-port 2445 --out-port 2445
+```
+
+Cần đăng nhập root; không hỏi mật khẩu cài, không cài Docker trên relay. Bộ cài tự thêm các gói iptables/iproute2/procps nếu thiếu. Nó không thay mật khẩu SSH/sudo hoặc mật khẩu panel. Trên AWG Easy, endpoint xuất cho client phải là `RELAY_IP:2445`. Giữ panel HTTPS trên OUT như hướng dẫn bên dưới. Muốn thử song song với hệ thống khác, chọn `--listen-port 2447` và sửa cổng endpoint trong profile thử tương ứng.
+
+Firewall nhà cung cấp cần cho phép relay UDP 2445 từ client và OUT UDP 2445 từ IP relay. Gói client vẫn được AWG mã hóa xuyên suốt đến OUT; NAT không thêm lớp che giấu AWG 3.1 trên đoạn giữa VPS. Chọn đường tunnel bên dưới khi đường UDP trực tiếp bị chặn hoặc cần lớp bọc riêng giữa hai máy. Không dùng NAT này để chuyển lưu lượng chưa mã hóa nếu bạn cần bảo mật trên đoạn relay–OUT.
+
+`awge-direct.timer` áp lại rule và phân giải DNS OUT mỗi phút, sau boot khoảng 20 giây. DNS lỗi giữ rule hiện tại. Khi đổi DNS thành công, các phiên NAT mới dùng IP mới; phiên UDP cũ có thể cần hết hạn conntrack hoặc tắt/bật VPN. Bộ cài dùng chain riêng, không flush firewall khác, không đổi default route của SSH. Khi cổng đã có DNAT cũ, rule mới đứng trước; gỡ bộ cài sẽ trả lại đường cũ nếu đường đó vẫn còn hoạt động. Chạy lại cùng lệnh giữ cấu hình; muốn đổi tham số phải gỡ rồi cài lại.
+
+```bash
+python3 /opt/awge-direct-relay/direct-relay.py --action status
+journalctl -u awge-direct.service -n 30 --no-pager
+# Gỡ riêng rule/timer NAT mới; giữ cấu hình lưu để kiểm tra/cài lại:
+python3 /opt/awge-direct-relay/direct-relay.py --action remove
+```
+
+Kết quả thử thực tế trên một cặp VPS: điện thoại Wi-Fi từ khoảng **160/160 lên 275/215 Mbps** sau khi bỏ backhaul bọc thêm. Phép đo iperf riêng cho thấy CPU relay từ gần 95% xuống khoảng 3–8%; iperf đó dùng client chẩn đoán trên VPS, không tương đương Speedtest điện thoại. Đây là kết quả của đường truyền đã thử, không phải cam kết tốc độ cho VPS khác. MSS 1100 không được giữ vì thử trên cùng điện thoại không cải thiện đồng đều.
+
+## Cài AWG Easy trên OUT và đường tunnel AWG 3.1 dự phòng
+
+Các lệnh `install.sh` dưới đây dựng kiến trúc tunnel hai lớp cũ. Nếu dùng NAT trực tiếp, OUT vẫn có thể được cài bằng lệnh OUT này; sau đó relay chỉ cần lệnh `direct.sh` ở trên. Backhaul trên OUT khi đó không nằm trên đường dữ liệu của client.
 
 Bộ cài một lệnh cho **Ubuntu 24.04 amd64**, chạy bằng **root**, không hỏi mật khẩu cài đặt hoặc menu tương tác.
 
@@ -8,7 +41,7 @@ Client AWG → relay:2445/UDP → tunnel AWG 3.1 → OUT → AmneziaWG Easy → 
 
 AWG Easy quản lý khách trên OUT. Relay chỉ chuyển tiếp UDP; không cần panel, database hoặc LucX. Hai lớp AWG dùng khóa và tham số độc lập.
 
-## Cài trên hai VPS mới
+### Cài đường tunnel trên hai VPS mới
 
 Cần VPS có TUN (`/dev/net/tun`), systemd, Internet/APT, `curl` và Python 3. Đăng nhập root trước. Bộ cài không cấu hình đăng nhập SSH hay bỏ mật khẩu SSH/sudo. Nếu dùng tài khoản thường, chỉ dùng `sudo -n bash ...` khi đã có sudo không mật khẩu.
 

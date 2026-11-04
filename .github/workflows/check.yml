@@ -12,14 +12,33 @@ jobs:
       - uses: actions/checkout@v4
       - run: |
           bash -n install.sh
-          python3 -m py_compile installer.py
+          bash -n direct.sh
+          python3 -m py_compile installer.py direct-relay.py
           python3 -m unittest discover -s tests -v
           python3 installer.py --help
           python3 - <<'PY'
           import hashlib, pathlib, re
           expected = re.search(r'INSTALLER_SHA256=([a-f0-9]{64})', pathlib.Path('install.sh').read_text())[1]
           assert hashlib.sha256(pathlib.Path('installer.py').read_bytes()).hexdigest() == expected
+          direct = re.search(r'DIRECT_SHA256=([a-f0-9]{64})', pathlib.Path('direct.sh').read_text())[1]
+          assert hashlib.sha256(pathlib.Path('direct-relay.py').read_bytes()).hexdigest() == direct
           PY
+      - name: Real kernel NAT rules, idempotent rerun, recovery and rollback
+        run: |
+          sudo python3 direct-relay.py --out-host 198.51.100.25 --listen-port 52447 --out-port 52445
+          sleep 3
+          sudo systemctl is-active awge-direct.timer
+          sudo python3 direct-relay.py --action apply
+          sudo iptables-save | sed '/^#/d' > /tmp/direct-before.rules
+          sudo python3 direct-relay.py --action apply
+          sudo iptables-save | sed '/^#/d' > /tmp/direct-after.rules
+          diff -u /tmp/direct-before.rules /tmp/direct-after.rules
+          WAN=$(ip -4 route get 198.51.100.25 | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
+          sudo iptables -t nat -D PREROUTING -i "$WAN" -p udp --dport 52447 -m addrtype --dst-type LOCAL -m comment --comment awge-direct-relay -j AWGED_DNAT
+          sudo systemctl start awge-direct.service
+          sudo python3 direct-relay.py --action status
+          sudo python3 direct-relay.py --action remove
+          ! sudo iptables-save | grep -q AWGED_
   out-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
