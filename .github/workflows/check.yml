@@ -31,6 +31,7 @@ jobs:
           sudo python3 installer.py --role out --out-host 192.0.2.10 --relay-host 192.0.2.20 > /tmp/awge-install.log 2>&1 || {
             # Installer output contains a pairing secret: do not publish its log.
             echo 'OUT install failed; collecting only public service states'
+            sudo grep -E '^(ERROR:|E:|Error response from daemon:|docker:)' /tmp/awge-install.log || true
             sudo docker ps -a --format '{{.Names}} {{.Status}}'
             sudo systemctl is-active docker awge-maintain.timer || true
             exit 1
