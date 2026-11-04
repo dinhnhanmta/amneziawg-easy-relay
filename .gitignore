@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.conf
+*.key
+*.env
+*.tar.gz
+state.json
+relay-pair.txt
+panel-password.txt
+.deployment-secrets/
+.test-tmp/
